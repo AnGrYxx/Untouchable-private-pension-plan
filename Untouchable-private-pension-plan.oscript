@@ -1,0 +1,167 @@
+{
+	/**
+	 * Untouchable private pension plan
+	 *
+	 * Private pension plans are very important nowadays. The state pension is in the most countries not sufficient anymore
+	 * to have enough to maintain a certain lifestyle once you stop working.
+	 * 
+	 * Interest rates are very low today and state pension plans are good, but also have a certain risk as of inflation and 
+	 * potential financial crisis.
+	 * 
+	 * So having part of your pension plans as a private untouchable crypto pension plan defineteley makes sense.
+	 * 
+	 * This AA covers exactly those points:
+	 * - Create a private pension plan: Define owner address (only this address can withdraw later) and an "expiry date" 
+	 *   that defines how long the funds are locked
+	 * - Anyone can deposit to each private pension plan
+	 * - The defined owner address can withdraw the deposited amount only after the defined expiry date completely or partly
+	 */
+	bounce_fees: { base: 10000 },
+	init: `{
+		$BOUNCE_FEE = 10000;
+		$TYPICAL_FEE = 1000;
+		$REIMBURSEMENT = $BOUNCE_FEE - $TYPICAL_FEE;
+	}`,
+	messages: {
+		cases: [
+			{
+				/**
+				 * Triggered by the person who wants to create a private pension plan
+				 *
+				 * @param owner - the owner of the pension plan that is able to withdraw from it 
+				 * @param period - the length of the period in seconds, after which the owner is allowed to withdraw the funds
+				 *
+				 */
+				if: `{ trigger.data.owner }`,
+				init: `{
+					$owner = trigger.data.owner otherwise bounce("owner field is missing");
+					$period = trigger.data.period otherwise bounce("period field is missing");
+					$balance = 0;
+					$reference = sha256($owner || $period || $balance || timestamp);
+
+					if (var[$reference]) bounce("pension plan already exists");
+				}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [{address: "{trigger.address}", amount: "{$REIMBURSEMENT}"}]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var[$reference] = 'requested';
+							var[$reference||'.owner'] = $owner;
+							var[$reference||'.period'] = $period;
+							var[$reference||'.balance'] = $balance;
+							var[$reference||'.timestamp'] = timestamp;
+							response['reference'] = $reference;
+							response['message'] = 'Pension plan created';
+							response['creation_time'] = var[$reference||'.timestamp'];
+							response['balance'] = var[$reference||'.balance'];
+						}`
+					}
+				]
+			},
+			{
+				/**
+				 * Triggered by anyone to deposit money.
+				 */
+				if: `{trigger.data.deposit AND trigger.output[[asset = base]] > $BOUNCE_FEE}`,
+				init: `{
+					$reference = trigger.data.reference otherwise bounce("pension plan reference is missing");
+					$balance = var[$reference||'.balance'];
+					$deposit = trigger.output[[asset = base]] - $TYPICAL_FEE;
+					$newbalance = $balance + $deposit;
+				}`,
+				messages: [
+					{
+						app: 'state',
+						state: `{
+							var[$reference||'.balance'] = $newbalance;
+							response['message'] = 'Added ' || $deposit || ' bytes to the private pension plan ' || $reference ||'.';
+							response['balance'] = 'The current balance of pension plan ' || $reference || 'is ' || $newbalance ||'.';
+						}`
+					}
+				]
+			},
+			{
+				/**
+				 * Pension plan owner withdrawal
+				 */
+				if: `{trigger.data.withdraw}`,
+				init: `{
+					$reference = trigger.data.reference otherwise bounce("pension plan reference is missing");
+					$balance = var[$reference||'.balance'];
+					$amount = trigger.data.amount otherwise $balance;
+					$newbalance = $balance - $amount;
+
+					if ($newbalance < 0) bounce("Invalid withdrawal amount. Maximum balance is " || $balance || '.');
+					if ($amount <= 0) bounce("Invalid withdrawal amount. Enter a number greater than zero.");
+					if (trigger.address != var[$reference||'.owner']) bounce("Unauthorized");
+				}`,
+				messages: {
+					cases: [
+						{//expiry date of private pension plan reached, payout possible
+							if: `{timestamp > (var[$reference||'.timestamp'] + var[$reference||'.period'])}`,
+							messages: [
+								{
+									app: 'payment',
+									payload: {
+									outputs: [
+										{address: "{var[$reference||'.owner']}", amount: "{$amount}"},
+										{address: "{var[$reference||'.owner']}", amount: "{$REIMBURSEMENT}"}
+									]
+									}
+								},		
+								{
+									app: 'state',
+									state: `{
+										var[$reference||'.balance'] = $newbalance;
+										response['message'] = 'Withdrawal of ' || $amount || ' bytes from your private pension plan ' || $reference ||'processed.';
+										response['balance'] = 'The current balance of your pension plan ' || $reference || 'is ' || var[$reference||'.balance'];
+									}`
+								}
+							]
+						},
+						{//expiry date of private pension plan not yet reached, payout not possible
+							if: `{timestamp < (var[$reference||'.timestamp'] + var[$reference||'.period'])}`,
+							messages: [
+								{
+									app: 'payment',
+									payload: {
+									outputs: [
+										{address: "{var[$reference||'.owner']}", amount: "{$REIMBURSEMENT}"}
+									]
+									}
+								},		
+								{
+									app: 'state',
+									state: `{
+										response['message'] = 'Withdrawal of ' || $amount || ' bytes from your private pension plan ' || $reference ||' was denied, as your defined expiry date was not yet reached. Expiry date was set to ' || var[$reference||'.timestamp'] || '.';
+										response['balance'] = 'The current balance of your pension plan ' || $reference || 'is ' || var[$reference||'.balance'];
+									}`
+								}
+							]
+						},
+					]
+				},
+			},
+			{
+				init: `{
+					bounce("Enter a data field: owner, deposit or withdraw");
+				}`,
+				messages: [
+					{
+						app: 'state',
+						state: `{
+							response['usage'] = 'Enter a data field: owner, deposit or withdraw';
+						}`
+					}
+				]
+			}
+		]
+	}
+}
